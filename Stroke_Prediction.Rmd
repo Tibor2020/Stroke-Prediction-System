@@ -1,0 +1,791 @@
+---
+title: "Building a Stroke Prediction System"
+subtitle: "Harvardx PH125.9x Capstone Project"
+author: "Tibor Nagy"
+date: "5/10/2021"
+output:
+  pdf_document: 
+    toc: true
+    toc_depth: 2
+  html_document:
+    df_print: paged
+  word_document: default
+  urlcolor: blue
+---
+\pagebreak
+
+```{r Required_packages, message=FALSE, warning=FALSE, include=FALSE}
+# List of packages for session
+.packages = c("tidyverse", "knitr", "caret", "randomForest", "rpart", "reshape2", "polycor")
+
+# Install missing packages
+.inst <- .packages %in% installed.packages()
+if(length(.packages[!.inst]) > 0) install.packages(.packages[!.inst])
+
+# Load packages  
+lapply(.packages, require, character.only=TRUE)
+```
+
+```{r Loading_data, message=FALSE, warning=FALSE, include=FALSE}
+#Downloading the data
+dl <- tempfile()
+download.file("https://drive.google.com/uc?export=download&id=14o2diuGl0eS2B80yoW5bJDnfhyzi1Cu9", dl)
+
+df <- read.csv(dl)
+df2 <- read.csv(dl)
+
+df$bmi <- as.numeric(df$bmi)
+df <- df %>% filter(df$gender %in% c("Female", "Male"))
+
+# Validation set will be 10% of Stroke Prediction data
+set.seed(1, sample.kind="Rounding") # if using R 3.5 or earlier, use `set.seed(1)`
+test_index <- createDataPartition(y = df$stroke, times = 1, p = 0.2, list = FALSE)
+stroke <- df[-test_index,]
+validation <- df[test_index,]
+```
+
+# 1.	Introduction
+
+According to a WHO survey, worldwide, cerebrovascular accidents (stroke) are the second leading cause of death and the third leading cause of disability. Stroke, the sudden death of some brain cells due to lack of oxygen when the blood flow to the brain is lost by blockage or rupture of an artery to the brain, is also a leading cause of dementia and depression.  
+Strokes mainly affect individuals at the peak of their productive life. Despite its enormous impact on countries’ socio-economic development, this growing crisis has received very little attention to date. (Ref: _Bulletin of the World Health Organization 2016; 94:634-634A_) 
+
+The purpose of this project is to use a publicly available dataset to build a stroke prediction system as a part of the Harvardx Professional Data Scientist program. I believe that informative websites and stroke prediction models available for everyone online, can increase the awareness of the population for this terrible disease. 
+
+The project is based on the Stroke Prediction Dataset publicly available on [\textcolor{blue}{Kaggle website}](https://www.kaggle.com/fedesoriano/stroke-prediction-dataset).
+Unfortunately, the descrioption of the dataset is not very detailed. We do not know what survey this dataset is based on, I suppose the survey was conducted in one of the countries of the developed world. The dataset is eligible to predict whether a patient is likely to get stroke based on the input parameters like gender, age, various diseases and smoking status. Each row in the data provides relevant information for more than 5000 patients.
+
+I divided the dataset to two subsets. The larger subset (called _stroke_) contains the 80% of the data and can be used as a training set during the development of the machine algorithms. The smaller subset (called _validation_) contains the remaining data. It cannot be used for training purposes, it is only for validation of the algorithms.
+
+In this project I tried to build a prediction system, which predict whether a patient is likely to get stroke on the validation data. The goal during the training of the algorithms is not to achieve as much overall accuracy as possible, but to build an algorithm with balanced performance measures. 
+
+
+# 2. Exploratory Data Analysis
+
+At first, we need to be familiarized with the two datasets (_stroke_ and _validation_) we are working with.
+
+## 2.1 Dataset Dimensions
+
+I used the _stroke_ as the training set and saved the _validation_ for evaluating the performance metrics of the final algorithm.
+
+<div align="center">
+</div>
+
+```{r Table1_Dataset_Dimensions, echo=FALSE, message=FALSE, warning=FALSE}
+Table_1 <- data.frame(
+  Dataset = c("stroke", "validation"),
+  No_of_Rows = c(nrow(stroke), nrow(validation)),
+  No_of_Cols = c(ncol(stroke), ncol(validation)))
+
+knitr::kable(
+  Table_1,
+  format = "pipe",
+  caption = "Dataset Dimensions",
+  col.names = c("Dataset", "No. of Rows", "No of Columns"))
+```
+
+## 2.2 Missing Data
+
+It is important to know if the dataset contains any missing values, because they can cause us difficulties during the development of the algorithm, so we have to address them. 
+
+```{r Table2_Missing_Data, echo=FALSE, message=FALSE, warning=FALSE}
+#Table 2: Missing Data
+NAs <- function(x) {sum(is.na(x))}
+stroke_NAs <- sapply(stroke, NAs) 
+validation_NAs <- sapply(validation, NAs)
+
+
+data.frame(cbind(stroke_NAs, validation_NAs)) %>%  
+  knitr::kable(format = "pipe", 
+               caption = "Number of N/A-s",
+               col.names = c("Stroke", "Validation"))
+```
+
+The above table tells us we there are some missing values, in the _bmi_ columns. To handle this problem, I substituted the _NA_ values with the median bmi of the whole dataset.
+
+```{r _Substituting_Missing_data, message=FALSE, warning=FALSE, include=FALSE}
+#Replacing N/As with the median of the whole df dataset
+df_temp <- df %>% filter(bmi != "NA" )
+NA_value <- median(df_temp$bmi)
+stroke$bmi <- ifelse(is.na(stroke$bmi), NA_value, stroke$bmi)
+validation$bmi <- ifelse(is.na(validation$bmi), NA_value, validation$bmi)
+```
+
+## 2.3 Dataset Structure
+
+The dataset is in tidy format. It contains 12 columns (features) and give us the following information:
+
+* id \<numeric\>: Unique identifier of the patient
+* gender \<character\>: The gender of the patient: "Male", "Female" or "Other"
+* age \<numeric\>:  The age of the patient
+* hypertension \<numeric\>: Binary variable: "0" if the patient doesn't have hypertension, "1" if the patient has hypertension
+* heart_disease \<numeric\>: Binary variable: "0" if the patient doesn't have any heart diseases, "1" if the patient has a heart disease
+* ever_married \<character\>: "No" or "Yes"
+* work_type \<character\>:  The employment status of the patient: "children", "Govt_jov", "Never_worked", "Private" or "Self-employed"
+* Residence_type \<character\>: The residence type of the patient:  "Rural" or "Urban"
+* avg_glucose_level \<numeric\>: The average glucose level in the patient’s blood
+* bmi \<character\>: The body mass index of the patient
+* smoking_status \<character\>: The smoking status of the patient: "formerly smoked", "never smoked", "smokes" or "Unknown"*
+* stroke \<numeric\>: Binary variable: "1" if the patient had a stroke or "0" if not
+
+Notes:  
+1. "Unknown" in smoking_status means that the information is unavailable for this patient  
+2.  The description of the dataset does not define what gender "Other" means. There is only `r sum(df2$gender == "Other")` patient in the dataset with this gender, so I removed it. 
+
+
+\pagebreak
+
+```{r Table3_Dataset_Structure, echo=FALSE, message=FALSE, warning=FALSE}
+stroke %>%
+  select(1:6) %>%
+  head() %>% 
+  knitr::kable(format = "pipe", caption = "Preview of the dataset (Columns: 1-6)")
+```
+
+```{r Table4_Dataset_Structure2, echo=FALSE, message=FALSE, warning=FALSE}
+stroke %>%
+  select(7:12) %>%
+  head() %>% 
+  knitr::kable(format = "pipe", caption = "Preview of the dataset (Columns: 7-12)")
+```
+
+
+Now let us delve into the details and see the distribution of some features. We need to get a clearer picture of the dataset, and the group of the patients whose data the dataset was created from.
+
+## 2.4 Distribution of Genders
+
+The shares of women and men in the human population is approximately 50-50%, but it varies a bit across regions. 
+The plot below shows us nearly the same gender proportions in the dataset.
+
+
+```{r Plot1_Gender_Distribution, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center', out.width="80%"}
+stroke %>%
+  group_by(gender) %>%
+  summarise(Rating = n()/nrow(.), number = n()) %>%
+  ggplot(aes(x = gender, y = Rating)) +
+  geom_bar(stat = "identity", fill = "cyan2") +
+  labs(title="Distribution of Genders", x = "Gender", y = "Rate") +
+  scale_y_continuous(labels = scales::percent) +
+  coord_flip()
+```
+
+## 2.5 Distribution of Age
+
+The age structure of the dataset is the following:  
+
+```{r Plot2_Age_Distribution, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center', out.width="80%"}
+stroke %>%
+  mutate(age_group = case_when(age < 15 ~ "0-14",
+                               age < 25 & age >= 15 ~ "15-24",
+                               age < 55 & age >= 25 ~ "25-54",
+                               age < 65 & age >= 55 ~ "55-64",
+                               age >= 65 ~ ">65")) %>%
+  group_by(age_group) %>%
+  summarise(Rating = n()/nrow(.), number = n()) %>%
+  ggplot(aes(x = age_group, y = Rating)) +
+  geom_bar(stat = "identity", fill = "tomato3") +
+  labs(title="Distribution of Age", x = "Age Group", y = "Rate") +
+  scale_x_discrete(limits=c("0-14", "15-24", "25-54", "55-64", ">65")) +
+  scale_y_continuous(labels = scales::percent)
+```
+
+The above plot shows us that all age groups are represented in the dataset, however the stroke incidents in the youngest age group are extremely rare.
+
+## 2.6 Distribution of the Body Mass Index
+
+Body Mass Index (BMI) is a measure for indicating nutritional status in adults. It is defined as a person’s weight in kilograms divided by the square of the person’s height in metres (kg/m2). 
+
+```{r Table5_BMI_Categories, echo=FALSE, message=FALSE, warning=FALSE}
+Table_5 <- data.frame(
+  BMI_Cat = c("Underweight", "Normal Weight", "Overweight", "Obese"),
+  BMI_Value = c("<20", "20-25", "25-30", ">30"))
+
+knitr::kable(
+  Table_5,
+  format = "pipe",
+  caption = "BMI Categories",
+  col.names = c("BMI Category", "BMI Value"))
+```
+\pagebreak
+
+The BMI distribution of the dataset is the following:
+
+```{r Plot3_BMI_Distribution, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center', out.width="80%"}
+stroke %>%
+  mutate(bmi_group = case_when(bmi < 20 ~ "<20",
+                               bmi < 25 & bmi >= 20 ~ "20-25",
+                               bmi < 30 & bmi >= 25 ~ "25-30",
+                               bmi >= 30 ~ ">30")) %>%
+  group_by(bmi_group) %>%
+  summarise(Rating = n()/nrow(.), number = n()) %>%
+  ggplot(aes(x = bmi_group, y = Rating)) +
+  geom_bar(stat = "identity", fill = "burlywood2") +
+  labs(title="Distribution of BMI", x = "BMI Group", y = "Rate") +
+  scale_x_discrete(limits=c("<20", "20-25", "25-30", ">30")) +
+  scale_y_continuous(labels = scales::percent) 
+```
+
+We can see that the majority of the patients are overweight (25<BMI<30) or obese (BMI>30). This confirms my suspicion that the dataset is from a high-income country.
+
+## 2.7 Distribution of Strokes
+
+```{r Plot4_Stroke_Distribution, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center', out.width="80%"}
+stroke %>%
+  group_by(stroke) %>%
+  summarise(Rating = n()/nrow(.), number = n()) %>%
+  ggplot(aes(x = stroke, y = Rating)) +
+  geom_bar(stat = "identity", fill = "lightslateblue") +
+  labs(title="Distribution of Strokes", x = "Stroke", y = "Rate") +
+  scale_x_discrete(limits=c(0, 1), labels=c("0" = "No", "1" = "Yes")) +
+  scale_y_continuous(labels = scales::percent) +
+  coord_flip()
+```
+
+From the plot above we can see that the percentage of the patients who had stroke is `r round(mean(stroke$stroke ==1), digits = 3)*100`%. But this is only a summary value. We know from several reports that the heart disease, high blood pressure and smoking are increase the probability of stroke. To get a clearer picture, let us see how these factors affect the distribution of stroke.
+
+
+## 2.8 Effects of Heart disease, High Blood Pressure and Smoking on Stroke
+
+The underlying heart diseases, high blood pressure and smoking increase the probability of having stroke. These factors are mentioned in all reports on stroke as high-risk factors. The charts below show the percentage of patients with one of these factors had stroke.
+
+
+```{r Plot5_Stroke_Heart_Disease, echo=FALSE, message=FALSE, warning=FALSE, fig.show="hold", out.width="50%"}
+StrokeHD <- stroke %>%
+  filter(heart_disease == 1)
+
+StrokeHD %>%
+  group_by(stroke) %>%
+  summarise(Rating = n()/nrow(.), number = n()) %>%
+  ggplot(aes(x = stroke, y = Rating)) +
+  geom_bar(stat = "identity", fill = "brown3") +
+  labs(title="Distribution of Strokes with underlying Heart Disease", x = "Stroke", y = "Rate") +
+  scale_x_discrete(limits=c(0, 1), labels=c("0" = "No", "1" = "Yes")) +
+  scale_y_continuous(labels = scales::percent) +
+  theme(axis.text=element_text(size=13), axis.title=element_text(size=13), title=element_text(size=13), 
+        legend.text=element_text(size=13)) +
+  coord_flip()
+
+StrokeHBP <- stroke %>%
+  filter(hypertension == 1)
+
+StrokeHBP %>%
+  group_by(stroke) %>%
+  summarise(Rating = n()/nrow(.), number = n()) %>%
+  ggplot(aes(x = stroke, y = Rating)) +
+  geom_bar(stat = "identity", fill = "brown3") +
+  labs(title="Distribution of Strokes with High Blood Pressure", x = "Stroke", y = "Rate") +
+  scale_x_discrete(limits=c(0, 1), labels=c("0" = "No", "1" = "Yes")) +
+  scale_y_continuous(labels = scales::percent) +
+  theme(axis.text=element_text(size=13), axis.title=element_text(size=13), title=element_text(size=13), 
+        legend.text=element_text(size=13)) +
+  coord_flip()
+```
+
+```{r Plot6_Stroke_Smoking, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center', out.width="50%"}
+StrokeSS <- stroke %>%
+  filter(smoking_status == "smokes")
+
+StrokeSS %>%
+  group_by(stroke) %>%
+  summarise(Rating = n()/nrow(.), number = n()) %>%
+  ggplot(aes(x = stroke, y = Rating)) +
+  geom_bar(stat = "identity", fill = "brown3") +
+  labs(title="Distribution of Strokes with Smoking", x = "Stroke", y = "Rate") +
+  scale_x_discrete(limits=c(0, 1), labels=c("0" = "No", "1" = "Yes")) +
+  scale_y_continuous(labels = scales::percent) +
+  theme(axis.text=element_text(size=13), axis.title=element_text(size=13), title=element_text(size=13), 
+        legend.text=element_text(size=13)) +
+  coord_flip()
+```
+
+
+We can see from the charts above how badly these three factors affect our chance to suffer stroke.  
+Heart disease has the greatest impact, it tripled the chance, increased it to `r round(mean(StrokeHD$stroke==1), digits =3)*100`%.  
+High blood pressure also has a significant effect, patients with high blood pressure have double chance to have stroke as the average. It increased the rate to `r round(mean(StrokeHBP$stroke==1), digits =3)*100`%.  
+Smoking does not have a significant effect in our dataset however it causes cancer, heart disease, lung diseases, diabetes, chronic obstructive pulmonary disease (COPD) and also increases the chance of stroke.
+It increased the rate to `r round(mean(StrokeSS$stroke==1), digits =3)*100`%.
+
+\pagebreak
+
+## 2.9 Effects of Lifestyle on Stroke
+
+Let us see how the patients’ lifestyle affect the probability of stroke. The effect of smoking was mentioned in the previous paragraph, here I analyzed only a few other aspects of their lifestyle. The below charts show effect of the marriage, rural life and the obesity (high BMI values).  
+
+```{r Plot7_Lifestyle, echo=FALSE, message=FALSE, warning=FALSE, fig.show="hold", out.width="50%"}
+StrokeMR <- stroke %>%
+  filter(ever_married == "Yes")
+
+StrokeMR %>%
+  group_by(stroke) %>%
+  summarise(Rating = n()/nrow(.), number = n()) %>%
+  ggplot(aes(x = stroke, y = Rating)) +
+  geom_bar(stat = "identity", fill = "deepskyblue3") +
+  labs(title="Effect of Marriage on Stroke", x = "Stroke", y = "Rate") +
+  scale_x_discrete(limits=c(0, 1), labels=c("0" = "No", "1" = "Yes")) +
+  scale_y_continuous(labels = scales::percent) +
+  theme(axis.text=element_text(size=13), axis.title=element_text(size=13), title=element_text(size=13), 
+        legend.text=element_text(size=13)) +
+  coord_flip()
+
+StrokeRL <- stroke %>%
+  filter(Residence_type == "Rural")
+
+StrokeRL %>%
+  group_by(stroke) %>%
+  summarise(Rating = n()/nrow(.), number = n()) %>%
+  ggplot(aes(x = stroke, y = Rating)) +
+  geom_bar(stat = "identity", fill = "deepskyblue3") +
+  labs(title="Effect of Rural Life on Stroke", x = "Stroke", y = "Rate") +
+  scale_x_discrete(limits=c(0, 1), labels=c("0" = "No", "1" = "Yes")) +
+  scale_y_continuous(labels = scales::percent) +
+  theme(axis.text=element_text(size=13), axis.title=element_text(size=13), title=element_text(size=13), 
+        legend.text=element_text(size=13)) +
+  coord_flip()
+```
+
+```{r Plot8_Stroke_Obesity, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center', out.width="50%"}
+StrokeOB <- stroke %>%
+  filter(bmi > 30)
+
+StrokeOB %>%
+  group_by(stroke) %>%
+  summarise(Rating = n()/nrow(.), number = n()) %>%
+  ggplot(aes(x = stroke, y = Rating)) +
+  geom_bar(stat = "identity", fill = "deepskyblue3") +
+  labs(title="Effect of Obesity on Stroke", x = "Stroke", y = "Rate") +
+  scale_x_discrete(limits=c(0, 1), labels=c("0" = "No", "1" = "Yes")) +
+  scale_y_continuous(labels = scales::percent) +
+  theme(axis.text=element_text(size=13), axis.title=element_text(size=13), title=element_text(size=13), 
+        legend.text=element_text(size=13)) +
+  coord_flip()
+```
+
+We can see that the probability of stroke among married patients is higher than the average `r round(mean(StrokeMR$stroke==1), digits =3)*100`%. Maybe married people live a more stressful life.  
+The obesity is increased the stroke chances as we expected. Knowing that obese people live a sedentary lifestyle which often leads to cardiovascular problems and high blood pressure, the result is not surprising. The rate is `r round(mean(StrokeOB$stroke==1), digits =3)*100`%.  
+Rural life, living in a calm environment has a slight positive effect on our health as the chart shows above. The probability of having stroke among rural people is a bit lower than the average, `r round(mean(StrokeRL$stroke==1), digits =3)*100`%.
+
+```{r Converting_and_Removing_Features, message=FALSE, warning=FALSE, include=FALSE}
+stroke <- stroke[,-1]
+stroke$stroke <- as.factor(stroke$stroke)
+stroke$gender <- as.factor(stroke$gender)
+stroke$hypertension <- as.factor(stroke$hypertension)
+stroke$heart_disease <- as.factor(stroke$heart_disease)
+stroke$ever_married <- as.factor(stroke$ever_married)
+stroke$work_type <- as.factor(stroke$work_type)
+stroke$Residence_type <- as.factor(stroke$Residence_type)
+stroke$smoking_status <- as.factor(stroke$smoking_status)
+
+validation <- validation[,-1]
+validation$stroke <- as.factor(validation$stroke)
+validation$gender <- as.factor(validation$gender)
+validation$hypertension <- as.factor(validation$hypertension)
+validation$heart_disease <- as.factor(validation$heart_disease)
+validation$ever_married <- as.factor(validation$ever_married)
+validation$work_type <- as.factor(validation$work_type)
+validation$Residence_type <- as.factor(validation$Residence_type)
+validation$smoking_status <- as.factor(validation$smoking_status)
+```
+
+
+## 2.10	Correlation Matrix
+
+```{r Plot9_Correlation_Matrix, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center', out.width="130%"}
+
+cormat <- round(hetcor(stroke)$correlations, digits=2)
+melted_cormat <- melt(cormat)
+
+get_lower_tri<-function(cormat){
+  cormat[lower.tri(cormat)] <- NA
+  return(cormat)}
+
+lower_tri <- get_lower_tri(cormat)
+
+melted_cormat <- reshape2::melt(lower_tri, na.rm = TRUE)
+
+ggplot(data = melted_cormat, aes(Var2, Var1, fill = value))+
+  geom_tile(color = "white")+
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                       midpoint = 0, limit = c(-1,1), space = "Lab", 
+                       name="Pearson\nCorrelation") +
+  theme_minimal()+ 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+                                   size = 8, hjust = 1), text=element_text(size=8))+
+  coord_fixed() +
+  geom_text(aes(Var2, Var1, label = value), color = "black", size = 3) +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    axis.ticks = element_blank(),
+    legend.justification = c(1, 0),
+    legend.position = c(0.6, 0.7),
+    legend.direction = "horizontal",
+    axis.text=element_text(size=8),
+    text=element_text(size=8),
+    axis.title=element_text(size=8),
+    legend.text=element_text(size=8)) +
+  guides(fill = guide_colorbar(barwidth = 8, barheight = 1,
+                               title.position = "top", title.hjust = 0.5))
+```
+
+The above plot shows us that the majority of the correlations between the outcome (_stroke_) and the features are moderate or weak. It has the strongest correlations with _age_ and _heart\_disease_. On the other hand, the correlation is weak, almost 0 with the _gender_ and _residence\_type_. From the aspect of machine learning we wouldn't lose much information if we removed these two features. The outcome has negative correlation with _smoking\_status_.
+
+
+# 3.	Preprocessing
+
+In machine learning, we must examine the predictors before running the machine algorithm.
+It is often needed to transform the predictors for some reason. We also remove predictors that are clearly not useful. 
+
+
+## 3.1	Converting and Removing Features
+
+If we take a closer look on the dataset, we can see that some features are not useful in their default class, some others are not useful at all. We must examine the features one by one and handle them in different ways.
+
+* The _id_ column contains a unique identifier for each patient, so it is not useful in our models. I removed it from the dataset.
+
+* As we saw in paragraph 2.3, most of the features of the dataset are character type. This type of features is not useful when we use machine learning algorithms, because not all of these algorithms accept this class of data as an input. In our case these are the _hypertension_, _heart\_disease_, _bmi_, _stroke_, _gender_, _ever\_married_, _Residence\_type_, _work\_type_ and _smoking\_status_ columns. They were converted to factors.
+
+## 3.2	Examination of the variability of the predictors
+
+The near zero variance predictors are clearly useless in machine learning, because they are nearly or entirely constant. To identify these predictors I used the _nearZeroVar()_ function. This function accepts data frames with all numeric data, so I removed the factor type columns before running the function. 
+The function does not recommend any feature to be removed, so I left all features in the dataset.
+
+
+
+# 4.	Addressing the Prevalence
+
+As we saw in paragraph 2.4, only 5% of the patients have stroke in our dataset, which means the prevalence of patients who do not have stroke is very high. In other words, we have a high imbalance between the observed classes. This imbalance can have a significant negative impact on model fitting. If we train an algorithm on a highly imbalanced train set, the overall accuracy of the model will be very high, but the sensitivity or the specificity could be very low, or even 0. In our case, if a  a patient has no stroke, the algorithm will likely to predict correctly. But if the patient has stroke, the algorithm will very likely to fail. During the optimization of the algorithms I focused on accuracy, sensitivity, specificity and F1 score to build models with balanced performance. 
+One technique for resolving such a class imbalance is to subsample the train set in a manner that mitigates the issues. I chose the up-sampling technique, because the the dataset is small. The _caret_ package contains a function (_upSample_) to do this. The function randomly samples (with replacement) the minority class (_stroke_ =1) to be the same size as the majority class (_stroke_=0).   
+I divided the dataset to a train set (called _stroke_), and a validation set (called _validation_). I up-sampled the _stroke_ set to mitigate the imbalance.
+
+```{r Train_Set_Upsampling, message=FALSE, warning=FALSE, include=FALSE}
+set.seed(1, sample.kind="Rounding") # if using R 3.5 or earlier, use `set.seed(1)`
+balanced_stroke <- upSample(x = stroke[, -ncol(stroke)],
+                     y = stroke$stroke,
+                     yname = "stroke")
+```
+
+```{r Table6_Balanced_Dataset, echo=FALSE, message=FALSE, warning=FALSE}
+knitr::kable(
+  table(balanced_stroke$stroke),
+  format = "pipe",
+  caption = "Structure of the Balanced Train Set",
+  col.names = c("Stroke", "Number"))
+```
+
+The following machine algorithms were trained on the new up-sampled train set (called _balanced\_stroke_), and they were tested on the validation set.
+
+
+# 5. Models
+
+In this project I had to predict a binary (classified) outcome, so I tried the 5 of the most popular classification algorithms. These are the _glm_, _LDA_, _kNN_, _rpart_ and the _randomForest_ algorithms. Each algorithm based on different ideas and concepts, I compared them to find out which is the most eligible in our case. 
+
+
+## 5.1 Logistic Regression model (glm)
+
+Logistic regression is a model that makes predictions using a logistic function to find the dependency between the output and input variables. It is a calculation used to predict a binary outcome, so it is a very good choice for this project. The _glm_ function has no tuning parameters.
+
+```{r glm_model, message=FALSE, warning=FALSE, include=FALSE}
+set.seed(1, sample.kind="Rounding") # if using R 3.5 or earlier, use `set.seed(1)`
+model_glm <- train(stroke ~ .,
+               data = balanced_stroke,
+               method = "glm",
+               family=binomial())
+
+prediction_glm <- predict(model_glm, validation, type = "raw")
+cm_glm <- confusionMatrix(data = prediction_glm, reference = validation$stroke, dnn = c("Prediction", "Reference"))
+```
+
+The results are the following:
+
+The overall accuracy I achieved on the validation set with this simple model is `r round(cm_glm$overall["Accuracy"], digits =4)`. This is not bad, considering the high prevalence of the dataset. All performance measures balanced. It would be much worse if the train set wasn't balanced.
+
+```{r Plot10_cm_glm, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center', out.width="50%"}
+ggplot(as.data.frame(cm_glm$table), aes(y=rev(Prediction), x=Reference, fill= Freq)) +
+  geom_tile(color = "black") + geom_text(aes(label=Freq),size=5) +
+  scale_fill_gradient(low="white", high="lightgreen") +
+  labs(x = "Reference",y = "Prediction") +
+  scale_x_discrete(labels=c("0","1")) +
+  scale_y_discrete(labels=c("1","0")) +
+  ggtitle("Confusion Matrix (glm model)") +
+  theme(axis.text=element_text(size=13), axis.title=element_text(size=13), title=element_text(size=13),        legend.text=element_text(size=13))
+
+```
+
+```{r Table7_glm_performance, echo=FALSE, message=FALSE, warning=FALSE}
+Summary_Table <- data.frame(glm = c(round(cm_glm$overall["Accuracy"], digits = 4), 
+                                    round(cm_glm$byClass["Sensitivity"], digits = 4),
+                                    round(cm_glm$byClass["Specificity"], digits = 4),
+                                    round(cm_glm$byClass["F1"], digits = 4)))
+
+
+knitr::kable(Summary_Table,
+             format = "pipe",
+             caption = "Performance Metrics")
+```
+
+
+## 5.2 LDA model
+
+Linear Discriminant Analysis (LDA) is a well-established machine learning technique and classification method for predicting categories. Its main advantages, compared to other classification algorithms such as neural networks and random forests, are that the model is interpretable and that prediction is easy. 
+LDA is used to predict the probability of belonging to a given class (or category) based on one or multiple predictor variables. It works with continuous and/or categorical predictor variables. It uses linear combinations of predictors to predict the class of a given observation.
+
+```{r LDA_model, message=FALSE, warning=FALSE, include=FALSE}
+set.seed(1, sample.kind="Rounding") # if using R 3.5 or earlier, use `set.seed(1)`
+model_lda <- train(stroke ~ .,
+                   data = balanced_stroke,
+                   method = "lda")
+
+prediction_lda <- predict(model_lda, validation, type = "raw")
+cm_lda <- confusionMatrix(data = prediction_lda, reference = validation$stroke, dnn = c("Prediction", "Reference"))
+```
+
+The overall accuracy, sensitivity and F1 score I achieved is a bit lower than those of the glm model. The specificity is `r round(cm_lda$byClass["Specificity"], digits =4)` exactly the same as that of the first model. The performance of the model is well balanced, however a bit worse than the first algorithm.
+
+```{r Plot11_cm_lda, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center', out.width="50%"}
+ggplot(as.data.frame(cm_lda$table), aes(y=rev(Prediction), x=Reference, fill= Freq)) +
+  geom_tile(color = "black") + geom_text(aes(label=Freq),size=5) +
+  scale_fill_gradient(low="white", high="lightgreen") +
+  labs(x = "Reference",y = "Prediction") +
+  scale_x_discrete(labels=c("0","1")) +
+  scale_y_discrete(labels=c("1","0")) +
+  ggtitle("Confusion Matrix (LDA model)") +
+  theme(axis.text=element_text(size=13), axis.title=element_text(size=13), title=element_text(size=13), 
+        legend.text=element_text(size=13))
+```
+
+```{r Table8_lda_performance, echo=FALSE, message=FALSE, warning=FALSE}
+Summary_Table["LDA"] <- c(round(cm_lda$overall["Accuracy"], digits = 4), 
+                          round(cm_lda$byClass["Sensitivity"], digits = 4),
+                          round(cm_lda$byClass["Specificity"], digits = 4),
+                          round(cm_lda$byClass["F1"], digits = 4))
+
+knitr::kable(Summary_Table,
+             format = "pipe",
+             caption = "Performance Metrics")
+```
+
+
+## 5.3 kNN model
+
+K-nearest neighbors (kNN) is a pattern recognition algorithm that uses training datasets to find the k closest relatives in future examples. When kNN is used in classification, we calculate to place data within the category of its nearest neighbor.
+I used the _train_ function from the _caret_ package to train the algorithm. By default, the _train_ function performs cross validation by taking 25 bootstrap samples comprised of 25% of the observations. For the kNN algorithm the tuning parameter is _k_. The default of the _train_ function is to try _k_= 5, 7, 9. I tried it on a bit wider scale: _k_= 3, 5, 7, 9, 13, 17.
+
+```{r kNN_model, message=FALSE, warning=FALSE, include=FALSE}
+model_knn <- train(stroke ~ .,
+                   data = balanced_stroke,
+                   method = "knn",
+                   tuneGrid = data.frame(k = c(3, 5, 7, 9, 13, 17)))
+
+prediction_knn <- predict(model_knn, validation, type = "raw")
+cm_knn <- confusionMatrix(data = prediction_knn, reference = validation$stroke, dnn = c("Prediction", "Reference"))
+```
+
+```{r Plot12_k_Accuracy, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center', out.width="80%"}
+ggplot(model_knn, highlight = TRUE) +
+  ggtitle("k ~ Accuracy Plot")
+```
+
+We can see that the _k_ value that gives the best accuracy is `r model_knn$bestTune`. This model has a very good accuracy, the F1 score is also excellent, but the specificity is much worse than that of the first two models. It is only `r round(cm_knn$byClass["Specificity"], digits =4)`. Unfortunately the performance is not balanced, it fails to predict stroke too often.
+
+```{r Plot13_cm_knn, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center', out.width="50%"}
+ggplot(as.data.frame(cm_knn$table), aes(y=rev(Prediction), x=Reference, fill= Freq)) +
+  geom_tile(color = "black") + geom_text(aes(label=Freq),size=5) +
+  scale_fill_gradient(low="white", high="lightgreen") +
+  labs(x = "Reference",y = "Prediction") +
+  scale_x_discrete(labels=c("0","1")) +
+  scale_y_discrete(labels=c("1","0")) +
+  ggtitle("Confusion Matrix (kNN model)") +
+  theme(axis.text=element_text(size=13), axis.title=element_text(size=13), title=element_text(size=13), 
+        legend.text=element_text(size=13))
+```
+
+```{r Table12_knn_performance, echo=FALSE, message=FALSE, warning=FALSE}
+Summary_Table["kNN"] <- c(round(cm_knn$overall["Accuracy"], digits = 4), 
+                          round(cm_knn$byClass["Sensitivity"], digits = 4),
+                          round(cm_knn$byClass["Specificity"], digits = 4),
+                          round(cm_knn$byClass["F1"], digits = 4))
+
+knitr::kable(Summary_Table,
+             format = "pipe",
+             caption = "Performance Metrics")
+```
+
+
+## 5.4 CART model (rpart)
+
+Classification and regression tree (CART) is a type of supervised learning algorithm that can be used in both regression and classification problems. It works for both categorical and continuous input and output variables.
+They are very powerful algorithms, capable of fitting complex datasets.   
+The major advantage of using decision trees is that they are intuitively very easy to explain. They closely mirror human decision-making compared to other regression and classification approaches. They can be displayed graphically.  
+Besides, decision trees are fundamental components of random forests, which are among the most potent Machine Learning algorithms available today.
+I used the complexity parameter (_cp_) to tune the algorithm, I tried it between 0.01 and 0.04.
+
+```{r rpart_model, message=FALSE, warning=FALSE, include=FALSE}
+model_rp <- train(stroke ~ .,
+                  data = balanced_stroke,
+                  method = "rpart",
+                  tuneGrid = data.frame(cp = seq(0.01, 0.04, 0.002)))
+
+prediction_rp <- predict(model_rp, validation, type = "raw")
+cm_rp <- confusionMatrix(data = prediction_rp, reference = validation$stroke, dnn = c("Prediction", "Reference"))
+
+```
+
+```{r Plot14_cp_Accuracy, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center',out.width="80%"}
+ggplot(model_rp, highlight = TRUE) +
+  ggtitle("Complexity Parameter ~ Accuracy Plot")
+
+```
+
+By further reducing the _cp_ value we could increase the accuracy of the algorithm, but on the other hand we could loose it's balance. With _cp_=`r model_rp$bestTune`, we have a well balanced model, with a performance somewhere between the first two models'.
+
+```{r Plot15_cm_knn, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center', out.width="50%"}
+ggplot(as.data.frame(cm_rp$table), aes(y=rev(Prediction), x=Reference, fill= Freq)) +
+  geom_tile(color = "black") + geom_text(aes(label=Freq),size=5) +
+  scale_fill_gradient(low="white", high="lightgreen") +
+  labs(x = "Reference",y = "Prediction") +
+  scale_x_discrete(labels=c("0","1")) +
+  scale_y_discrete(labels=c("1","0")) +
+  ggtitle("Confusion Matrix (rpart model)") +
+  theme(axis.text=element_text(size=13), axis.title=element_text(size=13), title=element_text(size=13), 
+        legend.text=element_text(size=13))
+```
+
+```{r Table13_rpart_performance, echo=FALSE, message=FALSE, warning=FALSE}
+Summary_Table["rpart"] <- c(round(cm_rp$overall["Accuracy"], digits = 4), 
+                            round(cm_rp$byClass["Sensitivity"], digits = 4),
+                            round(cm_rp$byClass["Specificity"], digits = 4),
+                            round(cm_rp$byClass["F1"], digits = 4))
+
+knitr::kable(Summary_Table,
+             format = "pipe",
+             caption = "Performance Metrics")
+```
+
+
+The final decision tree is the following:
+
+```{r Plot16_decision_tree, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center'}
+plot(model_rp$finalModel, margin = 0.01, main="CART Final Model", cex.main=0.75)
+text(model_rp$finalModel, cex = 0.75)
+```
+
+
+## 5.5 Random Forest model
+
+The random forest algorithm is an expansion of decision tree. A decision tree is a learning algorithm that is perfect for classification problems, as it is able to order classes on a precise level. It works like a flow chart, separating data points into two similar categories at a time from the “tree trunk” to “branches,” to “leaves,” where the categories become more finitely similar. This creates categories within categories, allowing for organic classification with limited human supervision.  
+The randomForest improves prediction performance of the decision tree by averaging multiple decision trees (a forest of trees constructed with randomness).  
+To increase accuracy, I used 5-fold cross validation, and tried the tuning parameter _mtry_ values 1, 5, 10, 25, 50. To mitigate the imbalance of the dataset I changed the cutoff for classification from the default 50-50% to 80-20%.
+
+```{r rf_model, message=FALSE, warning=FALSE, include=FALSE}
+set.seed(1, sample.kind="Rounding") # if using R 3.5 or earlier, use `set.seed(1)`
+control <- trainControl(method="cv", number = 5)
+grid <- data.frame(mtry = c(3, 5, 7, 10))
+model_rf <- train(stroke ~ .,
+                  data = balanced_stroke,
+                  trControl = control,
+                  tuneGrid = grid,
+                  cutoff = c(0.8, 0.2),
+                  method = "rf")
+
+prediction_rf <- predict(model_rf, validation, type = "raw")
+cm_rf <- confusionMatrix(data = prediction_rf, reference = validation$stroke, dnn = c("Prediction", "Reference"))
+```
+
+As we can see in the following plot the optimal _mtry_ is `r model_rf$bestTune`. It means we get the highest accuracy if all predictors selected in each tree.
+
+```{r Plot17_mtry_Accuracy, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center',out.width="80%"}
+ggplot(model_rf, highlight = TRUE) +
+  ggtitle("mtry ~ Accuracy Plot")
+```
+
+This model's performance is close to the kNN's. All performance metrics are very good except the specificity which less than the half of the others.
+
+```{r Plot18_cm_rf, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center', out.width="50%"}
+ggplot(as.data.frame(cm_rf$table), aes(y=rev(Prediction), x=Reference, fill= Freq)) +
+  geom_tile(color = "black") + geom_text(aes(label=Freq),size=5) +
+  scale_fill_gradient(low="white", high="lightgreen") +
+  labs(x = "Reference",y = "Prediction") +
+  scale_x_discrete(labels=c("0","1")) +
+  scale_y_discrete(labels=c("1","0")) +
+  ggtitle("Confusion Matrix (randomForest model)") +
+  theme(axis.text=element_text(size=13), axis.title=element_text(size=13), title=element_text(size=13), 
+        legend.text=element_text(size=13))
+```
+
+```{r Table14_rf_performance, echo=FALSE, message=FALSE, warning=FALSE}
+Summary_Table["randomForest"] <- c(round(cm_rf$overall["Accuracy"], digits = 4), 
+                          round(cm_rf$byClass["Sensitivity"], digits = 4),
+                          round(cm_rf$byClass["Specificity"], digits = 4),
+                          round(cm_rf$byClass["F1"], digits = 4))
+
+knitr::kable(Summary_Table,
+             format = "pipe",
+             caption = "Performance Metrics")
+```
+
+
+## 5.6 Ensemble model
+In general, ensembling is a technique of combining two or more algorithms of similar or dissimilar types called base learners. This is done to make a more robust system which incorporates the predictions from all the base learners. By using this technique, we can take all of these predictions into account while making the final decision. This will make our final decision more robust, accurate and less likely to be biased.
+There are different types of ensembling. In this project I took the prediction with maximum vote from all model’s predictions as the final prediction.
+
+As the figures show below this is the most balanced and most robust method. It has a bit higher accuracy, sensitivity and F1 score than the _glm_, _LDA_ and _rpart_ models. Besides, from the aspect of specificity it much better than the _kNN_ and _randomForest_ models.
+
+```{r ensemble_model, message=FALSE, warning=FALSE, include=FALSE}
+pred_df <- data.frame(prediction_glm,
+                prediction_lda,
+                prediction_knn,
+                prediction_rp,
+                prediction_rf)
+
+prediction_ens <- round(rowSums(sapply(pred_df, function(x) as.numeric(as.character(x))))/5)
+prediction_ens <- as.factor(prediction_ens)
+cm_ens <- confusionMatrix(data = prediction_ens, reference = validation$stroke, dnn = c("Prediction", "Reference"))
+```
+
+```{r Plot19_cm_ens, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center', out.width="50%"}
+ggplot(as.data.frame(cm_ens$table), aes(y=rev(Prediction), x=Reference, fill= Freq)) +
+  geom_tile(color = "black") + geom_text(aes(label=Freq),size=5) +
+  scale_fill_gradient(low="white", high="lightgreen") +
+  labs(x = "Reference",y = "Prediction") +
+  scale_x_discrete(labels=c("0","1")) +
+  scale_y_discrete(labels=c("1","0")) +
+  ggtitle("Confusion Matrix (Ensemble model)") +
+  theme(axis.text=element_text(size=13), axis.title=element_text(size=13), title=element_text(size=13), 
+        legend.text=element_text(size=13))
+```
+
+```{r Table15_rf_performance, echo=FALSE, message=FALSE, warning=FALSE}
+Summary_Table["Ensemble"] <- c(round(cm_ens$overall["Accuracy"], digits = 4), 
+                                   round(cm_ens$byClass["Sensitivity"], digits = 4),
+                                   round(cm_ens$byClass["Specificity"], digits = 4),
+                                   round(cm_ens$byClass["F1"], digits = 4))
+
+knitr::kable(Summary_Table,
+             format = "pipe",
+             caption = "Performance Metrics")
+```
+
+
+# 6. Summary
+
+The goal of this project was to build a prediction system based on the Stroke Prediction dataset, which predict whether a patient is likely to get stroke or not. Because of the dataset is highly imbalanced, the goal during the training of the algorithms was to build an algorithm with balanced performance metrics. I used the accuracy, sensitivity, specificity and the F1 score to evaluate the models. Predicting the minority (_stroke_=1) and the majority class (_stroke_=0) accurately were considered equally important.  
+There are several classifiers available in R, I chose the _glm_, _LDA_, _rpart_, _kNN_ and _randomForest_ models to use in this project.  
+The simple methods were more eligible to achieve the goal. The _glm_, _LDA_ and _rpart_ models’ performance were more balanced, besides their overall accuracy were good too. I was a bit disappointed at the performance of the _kNN_ and _randomForest_ models. I expected that these complex and computationally expensive models will outperform the simple ones. That is not what happened. However I achieved better accuracy with them, but on the other hand their specificity were very low. This means they are very good at predicting majority class (_stroke_=0), but they often fail to predict the minority class (_stroke_=1) accurately.  
+Finally, I built an ensemble model which includes all the models using majority voting. 
+I achieved the most balanced performance metrics with this final model, all of them around 80%. This is clearly the best model built in this project.
+
+
+# 7. Future Considerations
+
+However I achieved pretty good results with the methods I used in this project, there are many other ways that worth to try if we would like to further increase performance in the future. For example we could try the following techniques:
+
+* __Preprocessing__: I used the up-sampling method to mitigate the class imbalance of the training set. But there are other ways to threat imbalanced datasets such as Synthetic Data Generation. The _ROSE_ function instead of replicating and adding the observations from the minority class, it overcomes imbalances by generating artificial data. It uses bootstrapping to generate artificial data. This method could achieve higher accuracy as compared to sampling methods.  
+*	__Models__: I used 5 classification models in this project, but there are several other models that we could try. For example the _Naive Bayes_, _SVM_, and _QDA_ models are very good and very popular classifiers. All of them based on different ideas.  
+*	__Training__: For training of the algorithms I used the _train_ function of the _caret_ package. By default, the _train_ function maximizes the accuracy for classification. Changing the optimality criterion to Cohen’s Kappa can improve the quality of the final model, when we are dealing with a highly imbalanced datatset.   
+If it does not improve our models, the _train_ function allows us to create our own optimalty criterion.  
+*	__Ensembling__: There are different types of ensembling. In this project I used majority voting, but we could try other ensemling techniques:    
+    + By using weighted voting we could give higher weightage to the votes of one or more best performing models. We could also penalize the weak ones.  
+    + Boosting is one of the ensemble learning techniques in machine learning and it is widely used in regression and classification problems. The main concept of this method is to improve (boost) the weak learners sequentially and increase the model accuracy with a combined model. There are several boosting algorithms such as _GBM_ (Gradient boosting), _AdaBoost_ (Adaptive Boost), _XGBoost_ and others.
+
